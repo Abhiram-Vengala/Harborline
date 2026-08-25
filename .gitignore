@@ -1,0 +1,22 @@
+# --- secrets ---
+.env
+*.env
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- generated output, not source ---
+eval/reports/*.json
+!eval/reports/.gitkeep
+
+# --- editor/OS cruft ---
+.vscode/
+.idea/
+.DS_Store

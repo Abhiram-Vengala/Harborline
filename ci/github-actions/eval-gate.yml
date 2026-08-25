@@ -1,0 +1,118 @@
+# ci/github-actions/eval-gate.yml
+#
+# Merge-blocking eval gate. Runs the golden dataset through the harness on
+# every PR touching harness/, eval/, or the agent implementation, and fails
+# the check if eval/gate.py decides the results don't clear the bar.
+#
+# Install: copy this file to .github/workflows/eval-gate.yml at the repo
+# root (GitHub only picks up workflows from that exact path).
+#
+# Two jobs:
+#   1. unit-tests   -- fast, runs on every PR, no live API calls needed
+#      (the smoke tests use fake model/judge clients, so this job costs
+#      nothing and has no external dependency to be flaky about)
+#   2. eval-gate    -- runs the real golden dataset. Requires GROQ_API_KEY
+#      (or whichever provider secret your agent_factory/judge_client use)
+#      to be set as a repository secret. This is the job that actually
+#      blocks merge.
+
+name: Eval Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "eval/**"
+      - "requirements.txt"
+      - ".github/workflows/eval-gate.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  unit-tests:
+    name: Unit + smoke tests (no live API calls)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run smoke tests
+        run: |
+          python tests/test_smoke.py
+          python tests/test_smoke1.py
+
+  eval-gate:
+    name: Golden dataset eval gate
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run eval suite against golden dataset
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          mkdir -p eval/reports
+          python -m eval.run_ci \
+            --dataset eval/datasets/golden \
+            --out eval/reports/pr-${{ github.event.pull_request.number || github.sha }}.json
+
+      - name: Check gate
+        run: |
+          python -m eval.gate \
+            --report eval/reports/pr-${{ github.event.pull_request.number || github.sha }}.json \
+            --min-pass-rate 0.9 \
+            --max-grader-errors 0 \
+            --max-total-cost-usd 2.00 \
+            --max-mean-latency-s 15.0
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval/reports/*.json
+          retention-days: 30
+
+      - name: Comment pass/fail summary on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `eval/reports/pr-${context.issue.number}.json`;
+            if (!fs.existsSync(path)) return;
+            const report = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const pct = (report.pass_rate * 100).toFixed(0);
+            const body = [
+              `### Eval gate results`,
+              `Pass rate: **${pct}%** (${report.cases.length} cases)`,
+              `Total cost: $${report.total_cost_usd.toFixed(4)}`,
+              `Mean latency: ${report.mean_latency_s.toFixed(2)}s`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

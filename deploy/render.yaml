@@ -1,0 +1,27 @@
+# deploy/render.yaml
+#
+# Render Blueprint. Push this file to your repo root (or point Render at
+# deploy/render.yaml in the Blueprint setup) and Render will provision the
+# service below automatically from deploy/Dockerfile.
+#
+# GROQ_API_KEY is marked sync:false so Render prompts for it in the
+# dashboard rather than storing the value in this file -- never commit a
+# real key into render.yaml.
+
+services:
+  - type: web
+    name: harborline-dashboard
+    runtime: docker
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    autoDeploy: true

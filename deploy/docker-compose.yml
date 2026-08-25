@@ -1,0 +1,57 @@
+# deploy/docker-compose.yml
+#
+# Local dev convenience: runs the dashboard with source mounted for
+# iteration, plus a place to add the eval CI job as a one-off run.
+#
+# Usage (from repo root):
+#   docker compose -f deploy/docker-compose.yml up
+#   docker compose -f deploy/docker-compose.yml run --rm eval-ci
+#
+# This is NOT what production deploys from -- production uses the built
+# image from deploy/Dockerfile directly (see deploy/render.yaml). Compose
+# here is for local iteration only.
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    volumes:
+      # Mount source for live iteration without rebuilding the image.
+      # Remove this in anything resembling a production compose file --
+      # it's a dev convenience only.
+      - ../harness:/app/harness
+      - ../eval:/app/eval
+      - ../observability:/app/observability
+    command: >
+      uvicorn observability.dashboard.app:app
+      --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Run the eval suite as a one-off container, same image as production,
+  # useful for reproducing a CI failure locally without installing deps
+  # on the host: docker compose -f deploy/docker-compose.yml run --rm eval-ci
+  eval-ci:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    volumes:
+      - ../eval/reports:/app/eval/reports
+    entrypoint: ["python", "-m", "eval.run_ci"]
+    command:
+      [
+        "--dataset", "eval/datasets/golden",
+        "--out", "eval/reports/local-run.json",
+        "--provider", "groq",
+      ]

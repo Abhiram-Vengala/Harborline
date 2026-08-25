@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Harborline Observability</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root { --bg: #0b0d12; --card: #12151c; --border: #232838; --text: #e6e9ef; --muted: #8b92a5; --accent: #6ee7b7; --bad: #f87171; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { padding: 24px 32px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main { padding: 24px 32px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .stat { font-size: 28px; font-weight: 700; }
+  .stat.bad { color: var(--bad); }
+  .stat.good { color: var(--accent); }
+  .full { grid-column: 1 / -1; }
+  canvas { max-height: 260px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Harborline Observability</h1>
+  <p>Live harness metrics + eval report trends. Auto-refreshes every 5s.</p>
+</header>
+<main>
+  <div class="card">
+    <h2>LLM Calls</h2>
+    <div class="stat" id="llm-count">-</div>
+  </div>
+  <div class="card">
+    <h2>Total Cost</h2>
+    <div class="stat" id="total-cost">-</div>
+  </div>
+  <div class="card">
+    <h2>Mean Latency</h2>
+    <div class="stat" id="mean-latency">-</div>
+  </div>
+  <div class="card">
+    <h2>Tool Success Rate</h2>
+    <div class="stat" id="tool-success">-</div>
+  </div>
+
+  <div class="card full">
+    <h2>Cost per LLM call (recent)</h2>
+    <canvas id="costChart"></canvas>
+  </div>
+
+  <div class="card full">
+    <h2>Eval Pass Rate Across Reports</h2>
+    <canvas id="passRateChart"></canvas>
+  </div>
+</main>
+
+<script>
+const fmtUsd = (n) => "$" + (n ?? 0).toFixed(4);
+const fmtPct = (n) => n === null || n === undefined ? "-" : (n * 100).toFixed(0) + "%";
+
+let costChart, passRateChart;
+
+async function refreshLive() {
+  const res = await fetch("/api/metrics/live?limit=200");
+  const data = await res.json();
+  const s = data.summary;
+
+  document.getElementById("llm-count").textContent = s.llm_call_count;
+  document.getElementById("total-cost").textContent = fmtUsd(s.total_cost_usd);
+  document.getElementById("mean-latency").textContent = (s.mean_llm_latency_s ?? 0).toFixed(2) + "s";
+  const toolEl = document.getElementById("tool-success");
+  toolEl.textContent = fmtPct(s.tool_success_rate);
+  toolEl.className = "stat " + (s.tool_success_rate !== null && s.tool_success_rate < 0.9 ? "bad" : "good");
+
+  const llmEntries = data.entries.filter(e => e.type === "llm_call");
+  const labels = llmEntries.map((_, i) => i + 1);
+  const costs = llmEntries.map(e => e.cost_usd ?? 0);
+
+  if (!costChart) {
+    costChart = new Chart(document.getElementById("costChart"), {
+      type: "line",
+      data: { labels, datasets: [{ label: "Cost (USD)", data: costs, borderColor: "#6ee7b7", tension: 0.2 }] },
+      options: { responsive: true, scales: { y: { beginAtZero: true } } },
+    });
+  } else {
+    costChart.data.labels = labels;
+    costChart.data.datasets[0].data = costs;
+    costChart.update();
+  }
+}
+
+async function refreshEvalReports() {
+  const res = await fetch("/api/metrics/eval-reports");
+  const data = await res.json();
+  const reports = data.reports || [];
+
+  const labels = reports.map(r => r.file.replace(".json", ""));
+  const passRates = reports.map(r => (r.pass_rate ?? 0) * 100);
+
+  const canvas = document.getElementById("passRateChart");
+  if (reports.length === 0) {
+    canvas.replaceWith(Object.assign(document.createElement("div"), {
+      className: "empty",
+      id: "passRateChart",
+      textContent: "No eval reports found yet in eval/reports/. Run eval/runner.py and save a report to see trends here.",
+    }));
+    return;
+  }
+
+  if (!passRateChart) {
+    passRateChart = new Chart(canvas, {
+      type: "bar",
+      data: { labels, datasets: [{ label: "Pass rate (%)", data: passRates, backgroundColor: "#6ee7b7" }] },
+      options: { responsive: true, scales: { y: { beginAtZero: true, max: 100 } } },
+    });
+  } else {
+    passRateChart.data.labels = labels;
+    passRateChart.data.datasets[0].data = passRates;
+    passRateChart.update();
+  }
+}
+
+function refreshAll() {
+  refreshLive().catch(console.error);
+  refreshEvalReports().catch(console.error);
+}
+
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# eval/datasets/golden/refund_policy.yaml
+#
+# Versioned golden test cases for the refund-policy RAG case. Add new
+# cases by appending, don't edit existing ones in place once they've run
+# in CI at least once -- change the `id` (e.g. rag-001 -> rag-001-v2) if
+# the expected behavior itself changes, so historical pass/fail trends
+# per id stay meaningful.
+
+- id: rag-001
+  input: "What's our refund policy for annual plans?"
+  expected_tool_calls: ["search_docs"]
+  context_snapshot: "docs/refund-policy.md@v3"
+  tags: ["rag", "policy", "regression-suite"]
+  max_cost_usd: 0.01
+  max_latency_s: 8.0
+  graders:
+    - type: contains
+      must_contain: ["30 days"]
+    - type: tool_calls
+    - type: cost_budget
+    - type: latency_budget
+
+- id: rag-002
+  input: "Can I get a refund after 45 days?"
+  expected_tool_calls: ["search_docs"]
+  context_snapshot: "docs/refund-policy.md@v3"
+  tags: ["rag", "policy", "edge-case"]
+  max_cost_usd: 0.01
+  graders:
+    - type: contains
+      must_contain: ["no", "not"]
+    - type: tool_calls
+    - type: cost_budget
+
+- id: rag-003
+  input: "Summarize our refund policy in one sentence."
+  expected_tool_calls: ["search_docs"]
+  context_snapshot: "docs/refund-policy.md@v3"
+  tags: ["rag", "policy", "open-ended"]
+  graders:
+    - type: llm_judge
+      rubrics:
+        - name: correctness
+          criterion: "The summary must accurately reflect a 30-day refund window and mention no other timeframe."
+          threshold: 0.8
+        - name: conciseness
+          criterion: "The response should be a single sentence, not a multi-paragraph explanation."
+          threshold: 0.7

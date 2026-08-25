@@ -1,0 +1,10 @@
+pydantic>=2.6
+pyyaml>=6.0
+python-dotenv>=1.0
+anthropic>=0.40
+groq>=0.13
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-otlp-proto-http>=1.24
+fastapi>=0.110
+uvicorn[standard]>=0.29
