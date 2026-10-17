@@ -9,6 +9,7 @@ Run: python -m pytest tests/test_smoke.py -v
 
 from __future__ import annotations
 
+
 import asyncio
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ from harness.core.lifecycle_hooks import HookEvent, LifecycleHooks
 from harness.core.state_store import StateStore
 from harness.core.tool_registry import ToolRegistry
 from harness.validation.input_validator import InputValidator, SourceRequirement
+from harness.core.state_store import Message , Role
 
 
 # ---------------------------------------------------------------------- #
@@ -218,12 +220,74 @@ async def test_tool_execution_error_is_reported_not_raised():
     assert "ERROR" in tool_messages[0].content
     print("test_tool_execution_error_is_reported_not_raised: PASS")
 
+class RecordingModelClient:
+    """Records every prompt it receives and replays scripted responses."""
+    def __init__(self, script):
+        self._script = list(script)
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt, tool_schemas):
+        self.prompts.append(prompt)
+        return self._script.pop(0)
+
+
+async def test_tool_results_reach_second_prompt():
+    sentinel = "SENTINEL-7f3a9c"
+
+    class Args(BaseModel):
+        query: str
+
+    async def lookup(query: str) -> str:
+        return f"{sentinel}: refunds are available within 30 days"
+
+    registry = ToolRegistry()
+    registry.register("lookup", Args, description="lookup")(lookup)
+
+    context = ContextManager(token_budget=4000)
+    context.set_system_prompt("You are a helpful assistant.")
+    model = RecordingModelClient([
+        ModelResponse(content="", tool_calls=[ToolCallRequest("lookup", {"query": "refund"}, "call_1")]),
+        ModelResponse(content="Done.", tool_calls=[]),
+    ])
+    loop = ExecutionLoop(
+        model_client=model, tool_registry=registry, context_manager=context,
+        state_store=StateStore(max_turns=5), max_turns=5,
+    )
+
+    question = "What is the refund window for annual plans?"
+    result = await loop.run(question)
+
+    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert len(model.prompts) == 2
+    assert question in model.prompts[0], "user question missing from first prompt"
+    assert sentinel not in model.prompts[0]
+    assert sentinel in model.prompts[1], "tool result missing from second prompt"
+    assert model.prompts[0] != model.prompts[1]
+    print("test_tool_results_reach_second_prompt: PASS")
+
+
+def test_history_budget_pins_latest_user_message():
+    cm = ContextManager(token_budget=200, token_counter=len)  # 1 char = 1 token
+    cm.set_system_prompt("sys")
+    history = [
+        Message(role=Role.USER, content="task"),
+        Message(role=Role.ASSISTANT, content="x" * 190),
+        Message(role=Role.ASSISTANT, content="recent"),
+    ]
+    assembled = cm.build(history=history)
+    assert [m.content for m in assembled.history] == ["task", "recent"]
+    assert assembled.dropped_history_count == 1
+    assert assembled.estimated_tokens <= 200
+    print("test_history_budget_pins_latest_user_message: PASS")
+
 
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
     await test_max_turns_exceeded_without_final_answer()
     await test_tool_execution_error_is_reported_not_raised()
+    await test_tool_results_reach_second_prompt()
+    test_history_budget_pins_latest_user_message()
     print("\nAll smoke tests passed.")
 
 

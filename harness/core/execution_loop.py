@@ -135,7 +135,7 @@ class ExecutionLoop:
                 HookContext(HookEvent.PRE_TURN, self.state.session_id, turn),
             )
  
-            assembled = self.context.build()
+            assembled = self.context.build(history=self.state.get_history())
  
             validation_result = None
             if self.validator is not None:
