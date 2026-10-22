@@ -205,7 +205,7 @@ class StateStore:
                 "session_id":self.session_id,
                 "created_at":self._created_at,
                 "turn_count":self._turn_count,
-                "max_truns":self.max_turns,
+                "max_turns":self.max_turns,
                 "messages":[m.to_dict() for m in self._messages],
                 "memory": dict(self._memory),
                 "cost_log": [asdict(c) for c in self._cost_log],
@@ -216,7 +216,10 @@ class StateStore:
 
     @classmethod
     def from_dict(cls , data:dict[str , Any])-> "StateStore":
-        store = cls(session_id = data["session_id"], max_turns=data.get("max_turns"))
+        store = cls(
+            session_id=data["session_id"],
+            max_turns=data.get("max_turns", data.get("max_truns")),
+        )
         store._created_at = data.get("created_at" , time.time())
         store._turn_count = data.get("turn_count",0)
         store._memory = dict(data.get("memory",{}))

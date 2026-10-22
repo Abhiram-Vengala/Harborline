@@ -61,6 +61,7 @@ class ToolResult:
     attempts : int
     succeeded : bool
     error: str | None = None
+    error_type : str | None = None
 
 @dataclass
 class RegisteredTool:
@@ -85,6 +86,16 @@ class RegisteredTool:
             "description" : self.description,
             "parameters" : self.input_schema.model_json_schema(),
         }
+
+def _describe_input_error(tool:RegisteredTool , exc: ValidationError) -> str:
+    problems = ";".join(
+        f"{'.'.join(str(p) for p in err['loc']) or '<arguments>'}: {err['msg']}"
+        for err in exc.errors()
+    )
+    return (
+        f"invalid arguments for tool {tool.name!r}: {problems}. "
+        f"Expected fields: {sorted(tool.input_schema.model_fields)}"
+    )
 
 class ToolRegistry:
     """
@@ -154,6 +165,13 @@ class ToolRegistry:
         """Tool schemas formatted for handing to an LLM's tool-use / function-calling API."""
         return [t.to_schema_dict() for t in self._tools.values()]
 
+    @staticmethod
+    def _failure(name , start , error , error_type , attempts: int =0) -> ToolResult:
+        return ToolResult(
+            tool_name = name , output= None , duration_s=time.monotonic() -start,
+            attempts= attempts , succeeded=False , error=error , error_type=error_type,
+        )
+
     async def execute(self , name :str , raw_args:dict[str,Any]) -> ToolResult:
         """
         Validate `raw_args` against the tool's input schema, run it
@@ -166,52 +184,53 @@ class ToolRegistry:
         name, bad schema) still raise, since those indicate a bug in the
         calling code, not a runtime tool failure.
         """
-        tool = self.get(name)
+        start = time.monotonic()
+
+        try:
+            tool = self.get(name)
+        except ToolNotFoundError as e:
+            return self._failure(name,start,str(e),"tool_not_found")
         try:
             validated = tool.input_schema.model_validate(raw_args)
         except ValidationError as e :
-            raise ToolInputValidationError(name , e.errors()) from e
+            return self._failure(
+                name,
+                start,
+                _describe_input_error(tool, e),
+                "invalid_arguments",
+            )
 
         kwargs = validated.model_dump()
         attempts = 0
         max_attempts = tool.max_retries +1 if tool.retryable else 1
         start = time.monotonic()
         last_error : BaseException | None = None
+        last_error_type = "execution_error"
 
         while attempts < max_attempts:
             attempts +=1 
             try:
                 output = await self._run_with_timeout(tool , kwargs)
-                if tool.output_schema is not None :
-                    try:
-                        output = tool.output_schema.model_validate(output)
-                    except ValidationError as e:
-                        raise ToolOutputValidationError(name , e.errors()) from e
-
-                return ToolResult(
-                    tool_name = name,
-                    output=output,
-                    duration_s=time.monotonic() -start,
-                    attempts=attempts,
-                    succeeded=True,
-                )
-            except (ToolTimeOutError,ToolExecutionError) as e:
+            except (ToolTimeOutError , ToolExecutionError) as e:
                 last_error = e
-                logger.warning(
-                    "tool %r attempt %d/%d failed: %s",
-                    name , attempts , max_attempts , e ,
-                )
-                if not tool.retryable or attempts >= max_attempts:
+                last_error_type = "timeout" if isinstance(e, ToolTimeOutError) else "execution_error"
+                logger.warning("tool %r attempt %d/%d failed: %s", name, attempts, max_attempts, e)
+                if attempts >= max_attempts:
                     break
                 await asyncio.sleep(tool.retry_backoff_s*attempts)
-
-        return ToolResult(
-            tool_name = name ,
-            output=None,
-            duration_s=time.monotonic() - start,
-            attempts=attempts,
-            succeeded= False,
-            error = str(last_error) if last_error else "unknown failure"
+                continue
+            if tool.output_schema is not None:
+                try:
+                    output = tool.output_schema.model_validate(output)
+                except ValidationError as e:
+                    msg = str(ToolOutputValidationError(name , e.errors()))
+                    return self._failure(name,start , msg , "invalid_output" , attempts)
+            return ToolResult(
+                tool_name = name , output=output , duration_s= time.monotonic()-start,
+                attempts=attempts,succeeded=True,
+            )
+        return self._failure(
+            name , start , str(last_error) if last_error else "unknown failure" , last_error_type , attempts
         )
 
     async def _run_with_timeout(self, tool: RegisteredTool, kwargs: dict[str , Any]) -> Any:

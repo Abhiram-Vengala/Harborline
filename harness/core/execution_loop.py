@@ -239,8 +239,8 @@ class ExecutionLoop:
             # doesn't crash the session either.
             self.state.add_message(
                 Role.TOOL,f"ERROR : {result.error}",
-                tool_name=call.tool_name , tool_call_id=call.call_id,
-                metadata={"error":True},
+                tool_name=call.tool_name or "<unknown>" , tool_call_id=call.call_id,
+                metadata={"error":True , "error_type" : result.error_type},
             )
         await self.hooks.fire(
             HookEvent.ON_TOOL_RESULT,

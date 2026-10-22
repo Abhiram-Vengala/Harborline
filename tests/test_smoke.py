@@ -280,6 +280,57 @@ def test_history_budget_pins_latest_user_message():
     assert assembled.estimated_tokens <= 200
     print("test_history_budget_pins_latest_user_message: PASS")
 
+async def test_registry_returns_errors_instead_of_raising():
+    registry = build_registry()   # search_docs(query: str)
+    r1 = await registry.execute("does_not_exist", {})
+    assert not r1.succeeded and r1.error_type == "tool_not_found" and "search_docs" in r1.error
+    r2 = await registry.execute("search_docs", {"wrong": 1})
+    assert not r2.succeeded and r2.error_type == "invalid_arguments" and "query" in r2.error
+    print("test_registry_returns_errors_instead_of_raising: PASS")
+
+
+async def test_bad_tool_calls_are_fed_back_to_model():
+    context = ContextManager(token_budget=4000)
+    context.set_system_prompt("sys")
+    state = StateStore(max_turns=5)
+    model = RecordingModelClient([
+        ModelResponse(content="", tool_calls=[ToolCallRequest("does_not_exist", {}, "c1")]),
+        ModelResponse(content="", tool_calls=[ToolCallRequest("search_docs", {"wrong": 1}, "c2")]),
+        ModelResponse(content="recovered", tool_calls=[]),
+    ])
+    loop = ExecutionLoop(
+        model_client=model, tool_registry=build_registry(), context_manager=context,
+        state_store=state, max_turns=5,
+    )
+    result = await loop.run("hi")
+
+    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert "does_not_exist" in model.prompts[1] and "search_docs" in model.prompts[1]
+    assert "query" in model.prompts[2]
+    tool_msgs = [m for m in state.get_history() if m.role == Role.TOOL]
+    assert len(tool_msgs) == 2 and all(m.metadata.get("error") for m in tool_msgs)
+    print("test_bad_tool_calls_are_fed_back_to_model: PASS")
+
+def test_state_store_round_trip():
+    store = StateStore(session_id="s1", max_turns=7)
+    store.add_message(Role.USER, "hi")
+    store.add_message(Role.TOOL, "result", tool_name="search_docs", tool_call_id="c1", metadata={"error": True})
+    store.set_memory("k", {"a": 1})
+    store.increment_turn()
+    store.record_cost("m", 10, 5, 0.01)
+
+    restored = StateStore.from_json(store.to_json())
+    assert restored.session_id == "s1"
+    assert restored.max_turns == 7
+    assert restored.turns_remaining() == 6
+    assert restored.get_memory("k") == {"a": 1}
+    assert [m.to_dict() for m in restored.get_history()] == [m.to_dict() for m in store.get_history()]
+    assert restored.cost_summary().total_cost_usd == store.cost_summary().total_cost_usd
+
+    legacy = store.to_dict()
+    legacy["max_truns"] = legacy.pop("max_turns")
+    assert StateStore.from_dict(legacy).max_turns == 7
+    print("test_state_store_round_trip: PASS")
 
 async def main():
     await test_happy_path_with_tool_call()
@@ -288,6 +339,10 @@ async def main():
     await test_tool_execution_error_is_reported_not_raised()
     await test_tool_results_reach_second_prompt()
     test_history_budget_pins_latest_user_message()
+    await test_registry_returns_errors_instead_of_raising()
+    await test_bad_tool_calls_are_fed_back_to_model()
+    test_state_store_round_trip()
+
     print("\nAll smoke tests passed.")
 
 
