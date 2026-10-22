@@ -26,7 +26,7 @@ from harness.core.execution_loop import (
     TurnEndReason,
 )
 from harness.core.lifecycle_hooks import HookEvent, LifecycleHooks
-from harness.core.state_store import StateStore
+from harness.core.state_store import StateStore , SnapshotNotFoundError
 from harness.core.tool_registry import ToolRegistry
 from harness.validation.input_validator import InputValidator, SourceRequirement
 from harness.core.state_store import Message , Role
@@ -332,6 +332,44 @@ def test_state_store_round_trip():
     assert StateStore.from_dict(legacy).max_turns == 7
     print("test_state_store_round_trip: PASS")
 
+def test_snapshot_restore_and_diff():
+    store = StateStore(max_turns=10)
+    store.add_message(Role.USER, "task")
+    store.set_memory("plan", {"steps": ["a"]})
+    store.increment_turn()
+    store.snapshot("before")
+
+    store.add_message(Role.ASSISTANT, "did stuff")
+    store.get_memory("plan")["steps"].append("b")     # nested mutation after the snapshot
+    store.set_memory("extra", 1)
+    store.increment_turn()
+    store.record_cost("m", 10, 5, 0.01)
+
+    d = store.diff("before")
+    assert [m.content for m in d.messages_added] == ["did stuff"]
+    assert d.memory_added == {"extra": 1}
+    assert "plan" in d.memory_changed
+    assert d.turn_delta == 1 and abs(d.cost_delta_usd - 0.01) < 1e-9
+
+    store.restore("before")
+    assert [m.content for m in store.get_history()] == ["task"]
+    assert store.get_memory("plan") == {"steps": ["a"]}   # fails with the old shallow copy
+    assert "extra" not in store.memory_keys()
+    assert store.turn_count == 2                           # budgets survive restore
+    assert store.cost_summary().total_cost_usd > 0
+
+    store.restore("before", restore_budgets=True)
+    assert store.turn_count == 1 and store.cost_summary().total_cost_usd == 0
+    assert store.diff("before").is_empty
+
+    try:
+        store.restore("nope")
+    except SnapshotNotFoundError:
+        pass
+    else:
+        raise AssertionError("expected SnapshotNotFoundError")
+    print("test_snapshot_restore_and_diff: PASS")
+
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
@@ -342,6 +380,7 @@ async def main():
     await test_registry_returns_errors_instead_of_raising()
     await test_bad_tool_calls_are_fed_back_to_model()
     test_state_store_round_trip()
+    test_snapshot_restore_and_diff()
 
     print("\nAll smoke tests passed.")
 

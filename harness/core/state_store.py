@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import uuid
+import copy
 from dataclasses import dataclass , field , asdict
 from enum import Enum
 from typing import Any , Iterable
@@ -61,6 +62,24 @@ class CostSummary:
     @property
     def total_tokens(self) -> int:
         return self.total_prompt_tokens + self.total_completion_tokens
+
+@dataclass
+class StateDiff:
+    messages_removed: list[Message] = field(default_factory=list)
+    messages_added: list[Message] = field(default_factory=list)
+    memory_added: dict[str,Any] = field(default_factory=dict)
+    memory_removed: dict[str,Any] = field(default_factory=dict)
+    memory_changed: dict[str , tuple[Any,Any]] = field(default_factory=dict)
+    turn_delta: int = 0
+    cost_delta_usd: float = 0.0
+
+    @property
+    def is_empty(self) -> bool :
+        return not(
+            self.messages_removed or self.messages_added or self.memory_added
+            or self.memory_removed or self.memory_changed or self.turn_delta
+            or self.cost_delta_usd
+        )
 
 class StateStore:
 
@@ -188,16 +207,77 @@ class StateStore:
     def exceeds_cost_budget(self,max_usd: float) -> bool:
         return self.cost_summary().total_cost_usd>=max_usd
 
+    def _capture(self) -> dict[str , Any]:
+        """Deep copy of restorable state. Caller must hold self._lock."""
+        return copy.deepcopy({
+            "messages": self._messages,
+            "memory": self._memory,
+            "turn_count": self._turn_count,
+            "cost_log": self._cost_log,
+        })
+
     def snapshot(self,label:str| None = None) -> str:
         snapshot_id = label or str(uuid.uuid4())
         with self._lock:
-            self._snapshots[snapshot_id] = {
-                "messages":list(self._messages),
-                "memory":dict(self._memory),
-                "turn_count":self._turn_count,
-                "cost_log":list(self._cost_log),
-            }
-            return snapshot_id
+            self._snapshots[snapshot_id] = self._capture()
+        return snapshot_id
+
+    def _get_snapshot(self,snapshot_id: str) -> dict[str,Any]:
+        try:
+            return self._snapshots[snapshot_id]
+        except KeyError:
+            raise SnapshotNotFoundError(
+                f"no snapshot {snapshot_id!r}. Known snapshots: {sorted(self._snapshots)}"
+            ) from None
+
+    def restore(self,snapshot_id: str ,*,restore_budgets:bool = False) -> None:
+        """
+        Roll messages and memory back to a snapshot. Turn count and cost log are
+        kept by default because that spend already happened; pass
+        restore_budgets=True to roll those back too (e.g. replaying an episode).
+        """
+        with self._lock:
+            snap = copy.deepcopy(self._get_snapshot(snapshot_id))
+            self._messages = snap["messages"]
+            self._memory = snap["memory"]
+            if restore_budgets:
+                self._turn_count = snap["turn_count"]
+                self._cost_log = snap["cost_log"]
+
+    def diff(self,from_id: str , to_id : str | None = None) -> StateDiff:
+        """Compare a snapshot against another snapshot, or against live state if to_id is None."""
+        with self._lock:
+            a= self._get_snapshot(from_id)
+            b= self._get_snapshot(to_id) if to_id is not None else self._capture()
+
+        common = 0
+        for ma , mb in zip(a["messages"] , b["messages"]):
+            if ma != mb :
+                break
+            common +=1
+
+        mem_a , mem_b = a["memory"] , b["memory"]
+        return StateDiff(
+            messages_removed=a["messages"][common:],
+            messages_added=b["messages"][common:],
+            memory_added={k: mem_b[k] for k in sorted(mem_b.keys() - mem_a.keys())},
+            memory_removed={k: mem_a[k] for k in sorted(mem_a.keys() - mem_b.keys())},
+            memory_changed={
+                k: (mem_a[k], mem_b[k])
+                for k in sorted(mem_a.keys() & mem_b.keys()) if mem_a[k] != mem_b[k]
+            },
+            turn_delta=b["turn_count"] -a["turn_count"],
+            cost_delta_usd=sum(c.cost_usd for c in b["cost_log"]) - sum(c.cost_usd for c in a["cost_log"]),
+        )
+
+    def list_snapshots(self) -> list[str]:
+        with self._lock:
+            return sorted(self._snapshots)
+
+    def delete_snapshot(self,snapshot_id:str) -> None:
+        with self._lock:
+            self._get_snapshot(snapshot_id)
+            del self._snapshots[snapshot_id]
         
     def to_dict(self) -> dict[str,Any]:
         with self._lock:
