@@ -159,7 +159,7 @@ class StateStore:
         with self._lock:
             self._memory[key] = value
 
-    def get_memory(self,key:str, default = Any) -> None:
+    def get_memory(self,key:str, default: Any = None) -> Any:
         with self._lock:
             return self._memory.get(key,default)
 

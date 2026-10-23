@@ -370,6 +370,16 @@ def test_snapshot_restore_and_diff():
         raise AssertionError("expected SnapshotNotFoundError")
     print("test_snapshot_restore_and_diff: PASS")
 
+def test_get_memory_defaults():
+    store = StateStore()
+    assert store.get_memory("missing") is None
+    assert store.get_memory("missing", "fallback") == "fallback"
+    store.set_memory("zero", 0)
+    store.set_memory("empty", "")
+    assert store.get_memory("zero", "fallback") == 0       # stored falsy values are returned as-is
+    assert store.get_memory("empty", "fallback") == ""
+    print("test_get_memory_defaults: PASS")
+
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
@@ -381,6 +391,7 @@ async def main():
     await test_bad_tool_calls_are_fed_back_to_model()
     test_state_store_round_trip()
     test_snapshot_restore_and_diff()
+    test_get_memory_defaults()
 
     print("\nAll smoke tests passed.")
 
