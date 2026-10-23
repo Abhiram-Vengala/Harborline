@@ -60,11 +60,15 @@ class SourceRequirement:
 
     freshness_check: Callable[[ContextSource],bool] | None = None
 
+    def __post_init__(self)-> None:
+        if self.source_ref is None and self.source_ref_prefix is None:
+            raise ValueError("SourceRequirement needs source_ref or source_ref_prefix")
+
     def matches(self,source_ref:str) -> bool:
-        if self.source_ref is None:
-            return source_ref == self.source_ref
-        if self.source_ref_prefix is None:
-            return source_ref.startswith(self.source_ref_prefix)
+        if self.source_ref is not None and source_ref == self.source_ref:
+            return True
+        if self.source_ref_prefix is not None and source_ref.startswith(self.source_ref_prefix):
+            return True
         return False
 
 class InputValidator:

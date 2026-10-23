@@ -391,6 +391,43 @@ def test_invalid_role_is_a_state_store_error():
         raise AssertionError("expected InvalidRoleError")
     print("test_invalid_role_is_a_state_store_error: PASS")
 
+def test_source_requirement_matches():
+    exact = SourceRequirement(source_ref="docs/a.md@v1")
+    assert exact.matches("docs/a.md@v1") and not exact.matches("docs/a.md@v2")
+
+    prefix = SourceRequirement(source_ref_prefix="docs/")
+    assert prefix.matches("docs/b.md@v1") and not prefix.matches("memory/x")
+
+    both = SourceRequirement(source_ref="x", source_ref_prefix="docs/")
+    assert both.matches("x") and both.matches("docs/z") and not both.matches("y")
+
+    try:
+        SourceRequirement()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for a requirement with no matcher")
+    print("test_source_requirement_matches: PASS")
+
+
+def test_validator_applies_requirements_to_sources():
+    class Doc(BaseModel):
+        title: str
+
+    validator = InputValidator()
+    validator.add_requirement(SourceRequirement(source_ref="api/doc", required=True, schema=Doc))
+    validator.add_requirement(SourceRequirement(source_ref_prefix="docs/", required=True))
+
+    good = ContextSource(source_ref="api/doc", kind=SourceKind.RETRIEVED, content='{"title": "x"}')
+    assert not validator.validate([good]).has_error          # raised TypeError before the fix
+
+    drifted = ContextSource(source_ref="api/doc", kind=SourceKind.RETRIEVED, content='{"name": "x"}')
+    assert any(i.check == "schema" for i in validator.validate([drifted]).errors())
+
+    empty = ContextSource(source_ref="docs/policy.md", kind=SourceKind.RETRIEVED, content="   ")
+    assert any(i.check == "completeness" for i in validator.validate([good, empty]).errors())
+    print("test_validator_applies_requirements_to_sources: PASS")
+
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
@@ -404,6 +441,8 @@ async def main():
     test_snapshot_restore_and_diff()
     test_get_memory_defaults()
     test_invalid_role_is_a_state_store_error()
+    test_source_requirement_matches()
+    test_validator_applies_requirements_to_sources()
 
     print("\nAll smoke tests passed.")
 
