@@ -26,7 +26,7 @@ from harness.core.execution_loop import (
     TurnEndReason,
 )
 from harness.core.lifecycle_hooks import HookEvent, LifecycleHooks
-from harness.core.state_store import StateStore , SnapshotNotFoundError
+from harness.core.state_store import StateStore , SnapshotNotFoundError , InvalidRoleError , StateStoreError
 from harness.core.tool_registry import ToolRegistry
 from harness.validation.input_validator import InputValidator, SourceRequirement
 from harness.core.state_store import Message , Role
@@ -380,6 +380,17 @@ def test_get_memory_defaults():
     assert store.get_memory("empty", "fallback") == ""
     print("test_get_memory_defaults: PASS")
 
+def test_invalid_role_is_a_state_store_error():
+    assert issubclass(InvalidRoleError, StateStoreError)
+    store = StateStore()
+    try:
+        store.add_message("wizard", "hi")
+    except StateStoreError as e:           # a broad catch must now work
+        assert isinstance(e, InvalidRoleError)
+    else:
+        raise AssertionError("expected InvalidRoleError")
+    print("test_invalid_role_is_a_state_store_error: PASS")
+
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
@@ -392,6 +403,7 @@ async def main():
     test_state_store_round_trip()
     test_snapshot_restore_and_diff()
     test_get_memory_defaults()
+    test_invalid_role_is_a_state_store_error()
 
     print("\nAll smoke tests passed.")
 

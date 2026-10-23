@@ -13,7 +13,7 @@ from typing import Any , Iterable
 class StateStoreError(Exception):
     """Base class for exceptions in the state store."""
 
-class InvalidRoleError(Exception):
+class InvalidRoleError(StateStoreError):
     """Raised when a message is added  with an unrecognized role"""
 
 class SnapshotNotFoundError(StateStoreError):
@@ -294,6 +294,13 @@ class StateStore:
     def to_json(self)-> str:
         return json.dumps(self.to_dict(),default=str)
 
+    @staticmethod
+    def _parse_role(raw: Any) -> Role:
+        try:
+            return Role(raw)
+        except ValueError as exc:
+            raise InvalidRoleError(f"Unknown role {raw!r} in serialized state") from exc
+
     @classmethod
     def from_dict(cls , data:dict[str , Any])-> "StateStore":
         store = cls(
@@ -305,7 +312,7 @@ class StateStore:
         store._memory = dict(data.get("memory",{}))
         store._messages = [
             Message(
-                role = Role(m["role"]),
+                role=cls._parse_role(m["role"]),
                 content = m["content"],
                 tool_name = m.get("tool_name"),
                 tool_call_id = m.get("tool_call_id"),
