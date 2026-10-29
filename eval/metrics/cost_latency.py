@@ -97,7 +97,7 @@ class RegressionGrader:
         self.name = name
         self.tolerance = tolerance
 
-    async def grade(self , * , actual_output: str , testcase : TestCase, run_context : dict[str,Any]) -> GradeResult:
+    async def grade(self , * , actual_output: str , test_case : TestCase, run_context : dict[str,Any]) -> GradeResult:
         baseline = run_context.get("baseline")
         if not baseline:
             return GradeResult(
