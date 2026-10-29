@@ -70,7 +70,6 @@ class ModelClient(Protocol):
     ) -> ModelResponse:...
 
 class TurnEndReason(str,Enum):
-    FINAL_ANSWERS= "final_answer"
     FINAL_ANSWER = "final_answer"
     MAX_TURNS = "max_turns"
     COST_BUDGET = "cost_budget"
@@ -182,7 +181,7 @@ class ExecutionLoop:
                     ),
                 )
                 return self._finish(
-                    TurnEndReason.FINAL_ANSWERS, turns_this_run,
+                    TurnEndReason.FINAL_ANSWER, turns_this_run,
                     final_answer=response.content, validation_result=validation_result,
                 )
  
@@ -247,7 +246,7 @@ class ExecutionLoop:
             HookEvent.ON_TOOL_RESULT,
             HookContext(
                 HookEvent.ON_TOOL_RESULT, self.state.session_id, turn,
-                data={"tool_name": call.tool_name, "result": result},
+                data={"tool_name": call.tool_name,"call_id":call.call_id, "result": result},
             ),
         )
         return result

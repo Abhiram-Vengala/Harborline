@@ -16,6 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from pydantic import BaseModel
 
 from harness.core.context_manager import ContextManager, ContextSource, SourceKind
@@ -25,11 +29,13 @@ from harness.core.execution_loop import (
     ToolCallRequest,
     TurnEndReason,
 )
-from harness.core.lifecycle_hooks import HookEvent, LifecycleHooks
+from harness.core.lifecycle_hooks import HookEvent, LifecycleHooks , HookContext
 from harness.core.state_store import StateStore , SnapshotNotFoundError , InvalidRoleError , StateStoreError
 from harness.core.tool_registry import ToolRegistry
 from harness.validation.input_validator import InputValidator, SourceRequirement
 from harness.core.state_store import Message , Role
+from harness.core.tool_registry import ToolRegistry , ToolResult
+from observability.tracing import HarnessTracer
 
 
 # ---------------------------------------------------------------------- #
@@ -108,7 +114,7 @@ async def test_happy_path_with_tool_call():
 
     result = await loop.run("What's your refund policy?")
 
-    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert result.end_reason == TurnEndReason.FINAL_ANSWER
     assert result.final_answer is not None and "30 days" in result.final_answer
     assert model.calls == 2
     assert fired == [HookEvent.ON_TOOL_CALL]
@@ -213,7 +219,7 @@ async def test_tool_execution_error_is_reported_not_raised():
     )
     result = await loop.run("try the flaky tool")
 
-    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert result.end_reason == TurnEndReason.FINAL_ANSWER
     history = state.get_history()
     tool_messages = [m for m in history if m.tool_name == "flaky_tool"]
     assert len(tool_messages) == 1
@@ -257,7 +263,7 @@ async def test_tool_results_reach_second_prompt():
     question = "What is the refund window for annual plans?"
     result = await loop.run(question)
 
-    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert result.end_reason == TurnEndReason.FINAL_ANSWER
     assert len(model.prompts) == 2
     assert question in model.prompts[0], "user question missing from first prompt"
     assert sentinel not in model.prompts[0]
@@ -304,7 +310,7 @@ async def test_bad_tool_calls_are_fed_back_to_model():
     )
     result = await loop.run("hi")
 
-    assert result.end_reason == TurnEndReason.FINAL_ANSWERS
+    assert result.end_reason == TurnEndReason.FINAL_ANSWER
     assert "does_not_exist" in model.prompts[1] and "search_docs" in model.prompts[1]
     assert "query" in model.prompts[2]
     tool_msgs = [m for m in state.get_history() if m.role == Role.TOOL]
@@ -474,6 +480,66 @@ async def test_runaway_agent_is_capped_per_run_on_reused_store():
     assert model.calls == 4          # 2 per run; the second run used to get 0
     print("test_runaway_agent_is_capped_per_run_on_reused_store: PASS")
 
+def make_tracer(hooks):
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))   # local provider, no global state touched
+    return HarnessTracer(hooks, tracer=provider.get_tracer("test")), exporter
+
+
+async def test_tracing_matches_tool_spans_by_call_id():
+    hooks = LifecycleHooks()
+    tracer, exporter = make_tracer(hooks)
+
+    def call_ctx(tool, cid):
+        return HookContext(HookEvent.ON_TOOL_CALL, "s1", 1, data={"tool_name": tool, "call_id": cid})
+
+    await hooks.fire(HookEvent.ON_TOOL_CALL, call_ctx("search", "c1"))
+    await hooks.fire(HookEvent.ON_TOOL_CALL, call_ctx("fetch", "c2"))
+
+    ok = ToolResult(tool_name="fetch", output="x", duration_s=0.1, attempts=1, succeeded=True)
+    bad = ToolResult(tool_name="search", output=None, duration_s=0.1, attempts=1, succeeded=False, error="boom")
+    # results arrive out of order: c2 finishes before c1
+    await hooks.fire(HookEvent.ON_TOOL_RESULT, HookContext(
+        HookEvent.ON_TOOL_RESULT, "s1", 1, data={"tool_name": "fetch", "call_id": "c2", "result": ok}))
+    await hooks.fire(HookEvent.ON_TOOL_RESULT, HookContext(
+        HookEvent.ON_TOOL_RESULT, "s1", 1, data={"tool_name": "search", "call_id": "c1", "result": bad}))
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    assert spans["tool.fetch"].attributes["harborline.succeeded"] is True
+    assert spans["tool.search"].attributes["harborline.succeeded"] is False   # old code swapped these
+    assert tracer._open_spans == {}
+    print("test_tracing_matches_tool_spans_by_call_id: PASS")
+
+
+async def test_tracing_does_not_leak_on_duplicate_call_id():
+    hooks = LifecycleHooks()
+    tracer, exporter = make_tracer(hooks)
+    ctx = HookContext(HookEvent.ON_TOOL_CALL, "s1", 1, data={"tool_name": "t", "call_id": "dup"})
+    await hooks.fire(HookEvent.ON_TOOL_CALL, ctx)
+    await hooks.fire(HookEvent.ON_TOOL_CALL, ctx)
+    result = ToolResult(tool_name="t", output="x", duration_s=0.1, attempts=1, succeeded=True)
+    await hooks.fire(HookEvent.ON_TOOL_RESULT, HookContext(
+        HookEvent.ON_TOOL_RESULT, "s1", 1, data={"tool_name": "t", "call_id": "dup", "result": result}))
+    assert len(exporter.get_finished_spans()) == 2
+    assert tracer._open_spans == {}
+    print("test_tracing_does_not_leak_on_duplicate_call_id: PASS")
+
+
+async def test_tracing_closes_open_spans_when_model_call_fails():
+    class ExplodingModel:
+        async def complete(self, prompt, tool_schemas):
+            raise RuntimeError("boom")
+
+    hooks = LifecycleHooks()
+    tracer, exporter = make_tracer(hooks)
+    loop, _ = make_loop(ExplodingModel(), hooks=hooks)
+    result = await loop.run("hi")
+    assert result.end_reason == TurnEndReason.ERROR
+    assert tracer._open_spans == {}                       # the llm.call span used to leak
+    assert "llm.call" in [s.name for s in exporter.get_finished_spans()]
+    print("test_tracing_closes_open_spans_when_model_call_fails: PASS")
+
 
 async def main():
     await test_happy_path_with_tool_call()
@@ -492,6 +558,9 @@ async def main():
     test_validator_applies_requirements_to_sources()
     await test_max_turns_is_per_run_on_reused_store()
     await test_runaway_agent_is_capped_per_run_on_reused_store()
+    await test_tracing_matches_tool_spans_by_call_id()
+    await test_tracing_does_not_leak_on_duplicate_call_id()
+    await test_tracing_closes_open_spans_when_model_call_fails()
 
     print("\nAll smoke tests passed.")
 

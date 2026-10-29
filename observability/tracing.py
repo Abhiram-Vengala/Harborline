@@ -111,6 +111,16 @@ class HarnessTracer:
     def _span_key(self , session_id: str , turn : int , kind: str) -> str:
         return f"{session_id}:{turn}:{kind}"
 
+    def _tool_key(self, ctx: HookContext) -> str:
+        return self._span_key(ctx.session_id, ctx.turn , f"tool:{ctx.data.get('call_id') or ''}")
+
+    def _end_open_span(self,key : str , error : str) -> None:
+        opened = self._open_spans.pop(key,None)
+        if opened:
+            span,_ = opened
+            span.set_status(Status(StatusCode.ERROR,error))
+            span.end()
+
     def _on_model_call(self , ctx : contextmanager) -> None:
         span = self.tracer.start_span(
             "llm.call",
@@ -153,6 +163,8 @@ class HarnessTracer:
  
     def _on_tool_call(self, ctx: HookContext) -> None:
         tool_name = ctx.data.get("tool_name", "unknown")
+        key = self._tool_key(ctx)
+        self._end_open_span(key , "superseded by another tool call with the same call_id")
         span = self.tracer.start_span(
             f"tool.{tool_name}",
             attributes={
@@ -162,40 +174,33 @@ class HarnessTracer:
                 "harborline.call_id": ctx.data.get("call_id", ""),
             },
         )
-        self._open_spans[self._span_key(ctx.session_id, ctx.turn, f"tool:{ctx.data.get('call_id')}")] = (
-            span, time.monotonic()
-        )
+        self._open_spans[key] = (span, time.monotonic())
  
     def _on_tool_result(self, ctx: HookContext) -> None:
         result = ctx.data.get("result")
-        call_id = getattr(result, "tool_name", None)
-        # Look up by tool_name+call structure -- ON_TOOL_CALL and
-        # ON_TOOL_RESULT share turn/session but the call_id lives on the
-        # ToolResult here, not in ctx.data directly, so match on tool_name
-        # within this turn.
-        key = self._span_key(ctx.session_id, ctx.turn, f"tool:{ctx.data.get('tool_name')}")
-        matched_key = None
-        for k in self._open_spans:
-            if k.startswith(f"{ctx.session_id}:{ctx.turn}:tool:"):
-                matched_key = k
-                break
-        opened = self._open_spans.pop(matched_key, None) if matched_key else None
+        opened = self._open_spans.pop(self._tool_key(ctx),None)
         duration_s = time.monotonic() - opened[1] if opened else None
  
-        if opened and result is not None:
+        if opened:
             span, _ = opened
-            span.set_attribute("harborline.succeeded", getattr(result, "succeeded", False))
-            span.set_attribute("harborline.attempts", getattr(result, "attempts", 1))
-            if getattr(result, "succeeded", False):
-                span.set_status(Status(StatusCode.OK))
-            else:
-                span.set_status(Status(StatusCode.ERROR, str(getattr(result, "error", "tool failed"))))
+            if result is not None :
+                succeeded = getattr(result, "succeeded", False)
+                span.set_attribute("harborline.succeeded", succeeded)
+                span.set_attribute("harborline.attempts", getattr(result, "attempts", 1))
+                error_type = getattr(result, "error_type", None)
+                if error_type:
+                    span.set_attribute("harborline.error_type", error_type)
+                if succeeded:
+                    span.set_status(Status(StatusCode.OK))
+                else:
+                    span.set_status(Status(StatusCode.ERROR, str(getattr(result, "error", "tool failed"))))
             span.end()
  
         self.sink.record({
             "type": "tool_call",
             "session_id": ctx.session_id,
             "turn": ctx.turn,
+            "call_id":ctx.data.get("call_id"),
             "timestamp": ctx.timestamp,
             "duration_s": duration_s,
             "tool_name": getattr(result, "tool_name", ctx.data.get("tool_name", "unknown")),
@@ -204,6 +209,9 @@ class HarnessTracer:
         })
  
     def _on_error(self, ctx: HookContext) -> None:
+        prefix = f"{ctx.session_id}:{ctx.turn}:"
+        for key in [k for k in self._open_spans if k.startswith(prefix)]:
+            self._end_open_span(key, f"closed by error: {ctx.data.get('error')}")
         self.sink.record({
             "type": "error",
             "session_id": ctx.session_id,

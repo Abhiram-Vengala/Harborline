@@ -127,7 +127,7 @@ async def main() -> None:
     broken_report = report
     broken_report.case_results = broken_report.case_results + [
         CaseResult(
-            test_case_id="rag-broken", end_reason=TurnEndReason.FINAL_ANSWERS, final_answer="wrong",
+            test_case_id="rag-broken", end_reason=TurnEndReason.FINAL_ANSWER, final_answer="wrong",
             grades=[GradeResult(grader_name="contains", status=GradeStatus.FAIL, score=0.0, reasoning="missing required text")],
             cost_usd=0.001, latency_s=0.5, tools_called=[],
         )
