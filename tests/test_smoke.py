@@ -428,6 +428,53 @@ def test_validator_applies_requirements_to_sources():
     assert any(i.check == "completeness" for i in validator.validate([good, empty]).errors())
     print("test_validator_applies_requirements_to_sources: PASS")
 
+def make_loop(model, *, max_turns=2, state=None, hooks=None):
+    class SearchArgs(BaseModel):
+        query: str
+
+    async def search_docs(query: str) -> str:
+        return f"results for {query}"
+
+    registry = ToolRegistry()
+    registry.register("search_docs", SearchArgs, description="search")(search_docs)
+    context = ContextManager(token_budget=4000)
+    context.set_system_prompt("sys")
+    state = state or StateStore()
+    loop = ExecutionLoop(
+        model_client=model, tool_registry=registry, context_manager=context,
+        state_store=state, hooks=hooks, max_turns=max_turns,
+    )
+    return loop, state
+
+async def test_max_turns_is_per_run_on_reused_store():
+    model = ScriptedModelClient([ModelResponse(content=f"a{i}") for i in range(3)])
+    loop, state = make_loop(model, max_turns=2)
+    for i in range(3):
+        result = await loop.run(f"q{i}")
+        assert result.end_reason == TurnEndReason.FINAL_ANSWER, f"run {i} ended with {result.end_reason}"
+        assert result.turns_used == 1
+    assert model.calls == 3          # the third run used to return MAX_TURNS with zero model calls
+    assert state.turn_count == 3     # session counter stays cumulative
+    print("test_max_turns_is_per_run_on_reused_store: PASS")
+
+
+async def test_runaway_agent_is_capped_per_run_on_reused_store():
+    class LoopingModel:
+        def __init__(self): self.calls = 0
+        async def complete(self, prompt, tool_schemas):
+            self.calls += 1
+            return ModelResponse(content="", tool_calls=[
+                ToolCallRequest("search_docs", {"query": "x"}, f"c{self.calls}")])
+
+    model = LoopingModel()
+    loop, _ = make_loop(model, max_turns=2)
+    for _ in range(2):
+        result = await loop.run("again")
+        assert result.end_reason == TurnEndReason.MAX_TURNS
+    assert model.calls == 4          # 2 per run; the second run used to get 0
+    print("test_runaway_agent_is_capped_per_run_on_reused_store: PASS")
+
+
 async def main():
     await test_happy_path_with_tool_call()
     await test_validation_blocks_on_missing_required_source()
@@ -443,6 +490,8 @@ async def main():
     test_invalid_role_is_a_state_store_error()
     test_source_requirement_matches()
     test_validator_applies_requirements_to_sources()
+    await test_max_turns_is_per_run_on_reused_store()
+    await test_runaway_agent_is_capped_per_run_on_reused_store()
 
     print("\nAll smoke tests passed.")
 

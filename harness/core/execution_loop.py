@@ -119,16 +119,13 @@ class ExecutionLoop:
         """
         self.state.add_message(Role.USER, user_input)
  
-        for _ in range(self.max_turns):
+        for turns_this_run in range(1,self.max_turns+1):
             turn = self.state.increment_turn()
- 
-            if self.max_turns and turn > self.max_turns:
-                return self._finish(TurnEndReason.MAX_TURNS, turn)
  
             if self.cost_budget_usd is not None and self.state.exceeds_cost_budget(
                 self.cost_budget_usd
             ):
-                return self._finish(TurnEndReason.COST_BUDGET, turn)
+                return self._finish(TurnEndReason.COST_BUDGET, turns_this_run)
  
             await self.hooks.fire(
                 HookEvent.PRE_TURN,
@@ -146,7 +143,8 @@ class ExecutionLoop:
                         turn, validation_result.summary(),
                     )
                     return self._finish(
-                        TurnEndReason.VALIDATION_BLOCKED, turn, validation_result=validation_result
+                        TurnEndReason.VALIDATION_BLOCKED, turns_this_run,
+                        validation_result=validation_result,
                     )
                 if validation_result.issues:
                     logger.warning(
@@ -165,7 +163,10 @@ class ExecutionLoop:
                     ),
                 )
                 logger.exception("model call failed on turn %d", turn)
-                return self._finish(TurnEndReason.ERROR, turn, validation_result=validation_result)
+                return self._finish(
+                    TurnEndReason.ERROR, turns_this_run,
+                    validation_result=validation_result,
+                )
  
             self.state.record_cost(
                 response.model, response.prompt_tokens, response.completion_tokens, response.cost_usd
@@ -181,7 +182,7 @@ class ExecutionLoop:
                     ),
                 )
                 return self._finish(
-                    TurnEndReason.FINAL_ANSWERS, turn,
+                    TurnEndReason.FINAL_ANSWERS, turns_this_run,
                     final_answer=response.content, validation_result=validation_result,
                 )
  
