@@ -183,7 +183,7 @@ class EpisodeRunner:
             self._fatal(run , K.CONTEXT_FAILURE , SUB.CONTEXT , "context_build",
                         f"context builder raised {type(exc).__name__}: {exc}")
             return
-        ep.transitions(S.MODEL_CALL)
+        ep.transition(S.MODEL_CALL)
 
     async def _on_model_call(self , run: _Run) -> None:
         ep = run.ep
@@ -213,7 +213,7 @@ class EpisodeRunner:
         if resp.tool_calls:
             ep.add_history("assistant", resp.content, tool_calls=[c.tool_name for c in resp.tool_calls])
             run.pending = list(resp.tool_calls)
-            ep.transitions(S.POLICY_CHECK)
+            ep.transition(S.POLICY_CHECK)
         else:
             ep.add_history("assistant", resp.content)
             run.final_candidate = resp.content
@@ -225,12 +225,12 @@ class EpisodeRunner:
         run.current_call = call
         run.tracker.record_tool_call()
         stop = run.ctl.poll(ep)
-        if stop is None:
+        if stop is not None:
             ep.finish(stop)
             return
 
         action = f"tool_call:{call.tool_name}"
-        known = {t.name for t in self.tools.list_tools()}
+        known = {t.name for t in self.tool.list_tools()}
         if call.tool_name not in known:
             run.pending.clear()
             self._recover(run, K.TOOL_NOT_FOUND, SUB.MODEL, action,f"model requested unknown tool {call.tool_name!r}",feedback=f"Tool {call.tool_name!r} does not exist. Available tools: {sorted(known)}")
@@ -242,6 +242,7 @@ class EpisodeRunner:
             reason = decision.reason or "denied by policy"
             if decision.fatal:
                 self._fatal(run, K.POLICY_FAILURE, SUB.POLICY, action, reason)
+                return
             else:
                 self._recover(run, K.POLICY_FAILURE, SUB.POLICY, action, reason,
                               feedback=f"Policy denied {call.tool_name}: {reason}")
@@ -252,7 +253,7 @@ class EpisodeRunner:
             self._fatal(run, K.LOOP_FAILURE, SUB.MODEL, action,
                         f"{call.tool_name} called with identical arguments {run.detector.threshold} times")
             return
-        ep.transitions(S.TOOL_EXECUTION)
+        ep.transition(S.TOOL_EXECUTION)
 
     async def _on_tool_execution(self , run: _Run) -> None:
         ep = run.ep
@@ -260,7 +261,7 @@ class EpisodeRunner:
         action = f"tool_call:{call.tool_name}"
         try:
             result = await asyncio.wait_for(
-                self.tools.execute(call.tool_name , call.arguments) , ep.config.tool_timeout_s
+                self.tool.execute(call.tool_name , call.arguments) , ep.config.tool_timeout_s
             )
         except asyncio.TimeoutError:
             run.pending.clear()
@@ -290,8 +291,18 @@ class EpisodeRunner:
         if not succeeded:
             run.pending.clear()
             err = str(getattr(result, "error" , None) or "tool failed")
-            kind = K.TOOL_TIMEOUT if "timeout" in err.lower() else K.TOOL_FAILURE
-            self._recover(run , kind , SUB.TOOL , action , err)
+            error_type = getattr(result, "error_type", None)
+            if error_type == "invalid_arguments":
+                kind, subsystem = K.TOOL_ARGUMENT_FAILURE, SUB.MODEL
+            elif error_type == "invalid_output":
+                kind, subsystem = K.TOOL_OUTPUT_FAILURE, SUB.TOOL
+            elif error_type == "tool_not_found":
+                kind, subsystem = K.TOOL_NOT_FOUND, SUB.MODEL
+            elif error_type == "timeout" or "timeout" in err.lower():
+                kind, subsystem = K.TOOL_TIMEOUT, SUB.TOOL
+            else:
+                kind, subsystem = K.TOOL_FAILURE, SUB.TOOL
+            self._recover(run , kind , subsystem , action , err)
             return
 
         text = str(getattr(result , "output" , ""))
@@ -299,14 +310,14 @@ class EpisodeRunner:
         if len(text) > limit:
             text = text[: limit] + f"... [truncated {len(text) - limit} chars]"
         run.observation = text
-        ep.transitions(S.OBSERVATION)
+        ep.transition(S.OBSERVATION)
 
     async def _on_observation(self , run: _Run) -> None:
         ep = run.ep
         call = run.current_call
         ep.add_history("tool" , run.observation, tool_name=call.tool_name, call_id=getattr(call, "call_id", None))
         run.tracker.reset_retries()
-        ep.transitions(S.POLICY_CHECK if run.pending else S.CONTEXT_BUILDING)
+        ep.transition(S.POLICY_CHECK if run.pending else S.CONTEXT_BUILDING)
 
     async def _on_verification(self , run: _Run) -> None:
         ep = run.ep
@@ -337,4 +348,4 @@ class EpisodeRunner:
             detail = f"retry budget exhausted ({run.tracker.retries} consecutive failures); last: {f.describe()}"
             ep.finish(run.ctl.for_failure(f.kind , detail))
             return
-        ep.transitions(S.CONTEXT_BUILDING, note ="retrying")
+        ep.transition(S.CONTEXT_BUILDING, note ="retrying")
